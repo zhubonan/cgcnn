@@ -6,9 +6,14 @@ import json
 import os
 import random
 import warnings
+from hashlib import md5
+from pathlib import Path
+import pickle
 
+from tqdm import tqdm
 import numpy as np
 import torch
+from monty.serialization import loadfn
 from pymatgen.core.structure import Structure
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.dataloader import default_collate
@@ -298,9 +303,10 @@ class CIFData(Dataset):
     cif_id: str or int
     """
     def __init__(self, root_dir, max_num_nbr=12, radius=8, dmin=0, step=0.2,
-                 random_seed=123):
+                 random_seed=123, generate_cache=True, cache_file=None):
         self.root_dir = root_dir
         self.max_num_nbr, self.radius = max_num_nbr, radius
+        self.random_seed = random_seed
         assert os.path.exists(root_dir), 'root_dir does not exist!'
         id_prop_file = os.path.join(self.root_dir, 'id_prop.csv')
         assert os.path.exists(id_prop_file), 'id_prop.csv does not exist!'
@@ -309,18 +315,46 @@ class CIFData(Dataset):
             self.id_prop_data = [row for row in reader]
         random.seed(random_seed)
         random.shuffle(self.id_prop_data)
+
         atom_init_file = os.path.join(self.root_dir, 'atom_init.json')
         assert os.path.exists(atom_init_file), 'atom_init.json does not exist!'
         self.ari = AtomCustomJSONInitializer(atom_init_file)
         self.gdf = GaussianDistance(dmin=dmin, dmax=self.radius, step=step)
+        self.has_structure_dir = os.path.exists(os.path.join(self.root_dir, 'structures'))
+
+        self._cache_data = None
+        md5_hash = md5(''.join(x[0] for x in self.id_prop_data).encode('utf-8')).hexdigest()
+        if cache_file is None:
+            # Use cached results if available
+            md5_hash = md5(''.join(x[0] for x in self.id_prop_data).encode('utf-8')).hexdigest()
+            if Path(self.root_dir + f'/cache-{md5_hash}-{random_seed}.pickle').is_file():
+                with open(self.root_dir + f'/cache-{md5_hash}-{random_seed}.pickle', 'rb') as f:
+                    self._cache_data = pickle.load(f)
+            else:
+                if generate_cache:
+                    self._cache_data = generate_cached_data(self)
+        else:
+            # Override with cached file
+            with open(cache_file, 'rb') as f:
+                self._cache_data = pickle.load(f)
+
 
     def __len__(self):
         return len(self.id_prop_data)
 
     @functools.lru_cache(maxsize=None)  # Cache loaded structures
     def __getitem__(self, idx):
+        if self._cache_data is None:
+            return self._load_cif(idx)
+        return self._cache_data[idx]
+
+    @functools.lru_cache(maxsize=None)  # Cache loaded structures
+    def _load_cif(self, idx):
         cif_id, target = self.id_prop_data[idx]
-        crystal = Structure.from_file(os.path.join(self.root_dir,
+        if self.has_structure_dir is not None:
+            crystal = loadfn(os.path.join(self.root_dir, 'structures', cif_id+'.json'))['structure']
+        else:
+            crystal = Structure.from_file(os.path.join(self.root_dir,
                                                    cif_id+'.cif'))
         atom_fea = np.vstack([self.ari.get_atom_fea(crystal[i].specie.number)
                               for i in range(len(crystal))])
@@ -350,3 +384,15 @@ class CIFData(Dataset):
         nbr_fea_idx = torch.LongTensor(nbr_fea_idx)
         target = torch.Tensor([float(target)])
         return (atom_fea, nbr_fea, nbr_fea_idx), target, cif_id
+
+def generate_cached_data(dataloader):
+    """Pre-compute the data and save disk for later loading"""
+
+    md5_hash = md5(
+        ''.join(x[0] for x in dataloader.id_prop_data).encode('utf-8')
+        ).hexdigest()
+
+    data = list(tqdm(dataloader))
+    with open(dataloader.root_dir + f'/cache-{md5_hash}-{dataloader.random_seed}.pickle', 'wb') as fh:
+        pickle.dump(data, fh) 
+    return data
