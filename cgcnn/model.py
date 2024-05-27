@@ -23,10 +23,12 @@ class ConvLayer(nn.Module):
         super(ConvLayer, self).__init__()
         self.atom_fea_len = atom_fea_len
         self.nbr_fea_len = nbr_fea_len
+        # This is the W_f and W_s matrix concatenated in the 1 direction as in eq. 5
         self.fc_full = nn.Linear(2*self.atom_fea_len+self.nbr_fea_len,
                                  2*self.atom_fea_len)
         self.sigmoid = nn.Sigmoid()
         self.softplus1 = nn.Softplus()
+        # Batch normalization - not mentioned in the paper but used in the implementation
         self.bn1 = nn.BatchNorm1d(2*self.atom_fea_len)
         self.bn2 = nn.BatchNorm1d(self.atom_fea_len)
         self.softplus2 = nn.Softplus()
@@ -70,6 +72,8 @@ class ConvLayer(nn.Module):
         nbr_core = self.softplus1(nbr_core)
         nbr_sumed = torch.sum(nbr_filter * nbr_core, dim=1)
         nbr_sumed = self.bn2(nbr_sumed)
+        # Seems to be different in the paper where there is no none-linearity
+        # potentially useful for improving the performance
         out = self.softplus2(atom_in_fea + nbr_sumed)
         return out
 
